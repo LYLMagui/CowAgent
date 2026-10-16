@@ -5,7 +5,6 @@ Translates agent events (message_update, message_end, tool_execution_end, etc.)
 into the CHAT socket protocol format (content chunks with segment_id, tool_calls chunks).
 """
 
-import re
 import uuid
 from typing import Callable, Optional
 
@@ -364,7 +363,7 @@ class ChatService:
         )
 
         from config import conf
-        max_context_turns = conf().get("agent_max_context_turns", 20)
+        max_context_turns = conf().get("agent_max_context_turns", 30)
 
         # Get full system prompt with skills
         full_system_prompt = agent.get_full_system_prompt()
@@ -527,6 +526,9 @@ class ChatService:
         # be noted here, otherwise idle scans never see any signal to evolve.
         if persist:
             self._note_evolution_turn(agent, context)
+
+        if persist and session_id:
+            self._remember_context_usage(agent, session_id, resolved_agent_id)
 
         logger.info(
             f"[ChatService] Agent run completed: agent={resolved_agent_id}, "
@@ -709,16 +711,9 @@ class ChatService:
     @staticmethod
     def _strip_peer_address(query: str, peer) -> str:
         """Drop the leading "@name" aimed at ``peer``; see AgentBridge._strip_address."""
-        if not query:
-            return query
-        labels = [label for label in (peer.name, peer.id) if label]
-        pattern = (
-            r"^\s*@(?:"
-            + "|".join(re.escape(label) for label in sorted(labels, key=len, reverse=True))
-            + r")[\s,，:：、]*"
-        )
-        stripped = re.sub(pattern, "", query, count=1, flags=re.IGNORECASE)
-        return stripped if stripped.strip() else query
+        from agent.team_addressing import strip_address
+
+        return strip_address(query, [peer.name, peer.id])
 
     @staticmethod
     def _restore_verbatim_query(messages: list, model_query: str, query: str) -> list:
@@ -763,7 +758,7 @@ class ChatService:
             from agent.memory import get_conversation_store
             from bridge.agent_initializer import AgentInitializer
 
-            max_turns = conf().get("agent_max_context_turns", 20)
+            max_turns = conf().get("agent_max_context_turns", 30)
             saved = get_conversation_store(owner.workspace).load_messages(
                 session_id, max_turns=max(3, max_turns // 2), with_authors=True
             )
@@ -794,6 +789,13 @@ class ChatService:
         except Exception as e:
             logger.debug(f"[ChatService] alias lookup failed: {e}")
         return agent_id
+
+    def _remember_context_usage(self, agent, session_id: str, owner_agent_id: str) -> None:
+        """Best-effort: a turn that answered must not fail over the usage chart."""
+        try:
+            self.agent_bridge.remember_context_usage(agent, session_id, owner_agent_id)
+        except Exception as e:
+            logger.debug(f"[ChatService] Context usage snapshot skipped: {e}")
 
     def _owner_workspace(self, owner_agent_id: str, agent) -> str:
         """Workspace whose store holds the conversation: the owner's."""
@@ -855,6 +857,7 @@ class ChatService:
                 return True
         except Exception:
             pass
+        stored = False
         try:
             from agent.memory import get_conversation_store
             store = get_conversation_store(workspace_root)
@@ -873,7 +876,8 @@ class ChatService:
             logger.warning(
                 f"[ChatService] Failed to persist messages for session={session_id}: {e}"
             )
-            return False
+            # Artifact indexing happens after the append committed; do not replay it.
+            return bool(stored)
 
 
 class _StreamState:

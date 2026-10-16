@@ -305,13 +305,13 @@ available_setting = {
     "agent_bindings": [],
     # Manual cap on the Agent-mode input budget, used to control cost / token
     # burn: history is compacted once the prompt reaches this many tokens, even
-    # when the model's window is far larger. Defaults to 64000. This value is
+    # when the model's window is far larger. Defaults to 200000. This value is
     # still clamped below the effective model's window (window - output
     # reserve), so a small-window model is never asked for more than it allows.
     # Set 0 to disable the manual cap and follow the model window instead.
-    "agent_max_context_tokens": 64000,
+    "agent_max_context_tokens": 200000,
     "agent_max_context_turns": 30,  # max context memory turns in Agent mode
-    "agent_max_steps": 30,  # max decision steps per run in Agent mode
+    "agent_max_steps": 100,  # max decision steps per run in Agent mode
     # Default permission mode for sessions that have not picked one of their own:
     # "read-only" | "workspace-write" | "full-access". Kept at full-access so an
     # existing install behaves exactly as before an upgrade. Only a fresh desktop
@@ -949,7 +949,7 @@ def get_appdata_dir():
     data_path = os.path.join(get_data_root(), conf().get("appdata_dir", ""))
     if not os.path.exists(data_path):
         logger.info("[INIT] data path not exists, create it: {}".format(data_path))
-        os.makedirs(data_path)
+        os.makedirs(data_path, exist_ok=True)
     return data_path
 
 
@@ -980,7 +980,8 @@ def get_weixin_credentials_path(instance_id: str = ""):
 
 
 def subscribe_msg():
-    trigger_prefix = conf().get("single_chat_prefix", [""])[0]
+    prefixes = conf().get("single_chat_prefix") or [""]
+    trigger_prefix = prefixes[0]
     msg = conf().get("subscribe_msg", "")
     return msg.format(trigger_prefix=trigger_prefix)
 

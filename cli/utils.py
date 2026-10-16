@@ -72,7 +72,8 @@ def load_config_json() -> dict:
         from cli.config_json import merge_duplicate_keys
 
         with open(config_path, "r", encoding="utf-8-sig") as f:
-            return json.load(f, object_pairs_hook=merge_duplicate_keys)
+            value = json.load(f, object_pairs_hook=merge_duplicate_keys)
+            return value if isinstance(value, dict) else {}
     except Exception:
         return {}
 
@@ -93,9 +94,9 @@ def get_cli_language() -> str:
         return "en"
 
 
-def load_skills_config() -> dict:
-    """Load skills_config.json from the custom skills directory."""
-    path = os.path.join(get_skills_dir(), "skills_config.json")
+def load_skills_config(agent_id: str = None) -> dict:
+    """Load skills_config.json from an Agent's skills directory."""
+    path = os.path.join(get_skills_dir(agent_id), "skills_config.json")
     if not os.path.exists(path):
         return {}
     try:
