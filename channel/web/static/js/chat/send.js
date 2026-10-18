@@ -385,7 +385,9 @@ function startSSE(requestId, loadingEl, timestamp, titleInfo, replayItems, resum
     // Render one SSE event into the bubble. Used by the live handler and by
     // re-attach replay alike, so both paths produce identical UI.
     function processSSEItem(item) {
-            if (item.type === 'reasoning') {
+            if (item.type === 'todo_update') {
+                applyWebTodoSnapshot(item, item.agent_id, item.session_id);
+            } else if (item.type === 'reasoning') {
                 ensureBotEl();
                 reasoningText += item.content;
                 if (!currentReasoningEl) {
@@ -905,7 +907,11 @@ function startSSE(requestId, loadingEl, timestamp, titleInfo, replayItems, resum
             // even while this session is in the background, where rendering
             // is intentionally skipped. Notify for both foreground and
             // background sessions, before the render guard below.
-            if (item.type === 'done') {
+            if (item.type === 'todo_update') {
+                // Todo snapshots remain scoped to their originating Agent/session,
+                // even when the chat view is currently showing another session.
+                applyWebTodoSnapshot(item, item.agent_id, item.session_id);
+            } else if (item.type === 'done') {
                 mainDone = true;
                 if (item.bot_seq !== undefined && item.bot_seq !== null) {
                     completedBotSeq = item.bot_seq;
