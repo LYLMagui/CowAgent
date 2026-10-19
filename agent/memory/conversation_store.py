@@ -2483,7 +2483,6 @@ class ConversationStore:
             conn.commit()
             self._migrate(conn)
             conn.executescript(_TODO_SNAPSHOTS_DDL)
-            self._migrate_todo_snapshots(conn)
             conn.executescript(_TODO_SNAPSHOTS_INDEX_DDL)
             conn.commit()
             # Runs are auxiliary. Their setup is isolated so a legacy table, a
@@ -2494,54 +2493,6 @@ class ConversationStore:
         finally:
             conn.close()
         self._schema_identity = self._db_identity()
-
-    def _migrate_todo_snapshots(self, conn: sqlite3.Connection) -> None:
-        """Remove legacy table constraints while preserving committed snapshots."""
-        try:
-            indexes = conn.execute("PRAGMA index_list(todo_snapshots)").fetchall()
-            has_unique_constraint = any(bool(row[2]) for row in indexes)
-            if not has_unique_constraint:
-                return
-
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                """
-                CREATE TABLE todo_snapshots_unconstrained (
-                    agent_id     TEXT    NOT NULL DEFAULT '',
-                    session_id   TEXT    NOT NULL,
-                    version      INTEGER NOT NULL,
-                    run_id       TEXT    NOT NULL,
-                    tool_call_id TEXT    NOT NULL,
-                    todos_json   TEXT    NOT NULL,
-                    explanation  TEXT    NOT NULL DEFAULT '',
-                    created_at   INTEGER NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                INSERT INTO todo_snapshots_unconstrained
-                    (agent_id, session_id, version, run_id, tool_call_id,
-                     todos_json, explanation, created_at)
-                SELECT agent_id, session_id, version, run_id, tool_call_id,
-                       todos_json, explanation, created_at
-                FROM todo_snapshots
-                """
-            )
-            conn.execute("DROP TABLE todo_snapshots")
-            conn.execute(
-                "ALTER TABLE todo_snapshots_unconstrained RENAME TO todo_snapshots"
-            )
-            conn.commit()
-            logger.info(
-                "[ConversationStore] Migrated todo_snapshots to application-managed deduplication"
-            )
-        except Exception as e:
-            conn.rollback()
-            logger.warning(
-                f"[ConversationStore] Could not migrate todo_snapshots constraints: {e}"
-            )
-            raise
 
     def _init_artifacts(self, conn: sqlite3.Connection) -> None:
         """Create the artifacts index without ever risking the core schema."""

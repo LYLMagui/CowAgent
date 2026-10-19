@@ -194,60 +194,17 @@ def test_session_deletion_failure_rolls_back_messages_and_todos(tmp_path, retent
     assert store.get_todo_snapshot("session")["todos"] == TODOS
 
 
-def test_legacy_constraints_are_migrated_without_losing_snapshots(tmp_path):
-    path = tmp_path / "legacy.db"
-    with sqlite3.connect(str(path)) as conn:
-        conn.execute(
-            """
-            CREATE TABLE sessions (
-                agent_id TEXT NOT NULL DEFAULT '', session_id TEXT NOT NULL,
-                channel_type TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '',
-                context_start_seq INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
-                last_active INTEGER NOT NULL, msg_count INTEGER NOT NULL DEFAULT 0,
-                pinned INTEGER NOT NULL DEFAULT 0, context_usage TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY (agent_id, session_id)
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL DEFAULT '',
-                session_id TEXT NOT NULL, seq INTEGER NOT NULL, role TEXT NOT NULL,
-                content TEXT NOT NULL, created_at INTEGER NOT NULL, extras TEXT NOT NULL DEFAULT '',
-                UNIQUE (agent_id, session_id, seq)
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE todo_snapshots (
-                agent_id TEXT NOT NULL DEFAULT '', session_id TEXT NOT NULL,
-                version INTEGER NOT NULL, run_id TEXT NOT NULL, tool_call_id TEXT NOT NULL,
-                todos_json TEXT NOT NULL, explanation TEXT NOT NULL DEFAULT '',
-                created_at INTEGER NOT NULL,
-                PRIMARY KEY (agent_id, session_id, version),
-                UNIQUE (agent_id, session_id, run_id, tool_call_id)
-            )
-            """
-        )
-        conn.execute(
-            "INSERT INTO sessions (agent_id, session_id, created_at, last_active) VALUES ('', 's', 1, 1)"
-        )
-        conn.execute(
-            "INSERT INTO todo_snapshots VALUES ('', 's', 1, 'r', 'c', ?, 'kept', 2)",
-            ('[{"content":"Keep me","status":"pending"}]',),
-        )
-
+def test_snapshot_table_uses_plain_indexes_only(tmp_path):
+    path = tmp_path / "index.db"
     store = ConversationStore(path)
-    assert store.get_todo_snapshot("s")["explanation"] == "kept"
+    _session(store)
     with sqlite3.connect(str(path)) as conn:
         indexes = conn.execute("PRAGMA index_list(todo_snapshots)").fetchall()
-        assert not any(bool(row[2]) for row in indexes)
-        names = {row[1] for row in indexes}
-        assert "idx_todo_snapshots_session" in names
-        assert "idx_todo_snapshots_call" in names
-    assert store.commit_todo_snapshot("s", "r", "next", []) == 2
+    assert not any(bool(row[2]) for row in indexes)
+    names = {row[1] for row in indexes}
+    assert {"idx_todo_snapshots_session", "idx_todo_snapshots_call"} <= names
+    assert store.commit_todo_snapshot("session", "run", "call", TODOS) == 1
+    assert store.commit_todo_snapshot("session", "run", "call", TODOS) == 1
 
 
 def test_missing_snapshot_table_fails_closed(tmp_path):
