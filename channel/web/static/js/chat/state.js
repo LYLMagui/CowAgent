@@ -449,27 +449,98 @@ function resetComposerHeight() {
 // feels like the list "fighting" the user and snapping to the bottom.
 let _autoScrollEnabled = true;
 const _SCROLL_THRESHOLD = 80; // px from bottom to re-enable auto-scroll
-let _programmaticScroll = false; // set while scrollChatToBottom() adjusts scrollTop
+let _programmaticScroll = false;
+let _programmaticScrollTop = null;
 let _lastScrollTop = 0;
+let _userScrollIntent = null;
+let _touchScrollStartY = null;
+const _HISTORY_PREFETCH_PX = 200;
+
+// Only user gestures trigger it, so the first-load bottom pins and message
+// navigator jumps never pull in pages on their own. Wheel and touch also call
+// it directly because a first page shorter than the viewport cannot scroll.
+function _maybeLoadEarlierHistory() {
+    if (!historyHasMore || historyLoading || !historyPage) return;
+    if (messagesDiv.scrollTop > _HISTORY_PREFETCH_PX) return;
+    if (typeof loadHistory === 'function') loadHistory(historyPage + 1);
+}
+
+messagesDiv.addEventListener('wheel', event => {
+    if (event.deltaY < 0) {
+        _userScrollIntent = 'up';
+        _maybeLoadEarlierHistory();
+    } else if (event.deltaY > 0) _userScrollIntent = 'down';
+}, { passive: true });
+messagesDiv.addEventListener('touchstart', event => {
+    _touchScrollStartY = event.touches[0]?.clientY ?? null;
+}, { passive: true });
+messagesDiv.addEventListener('touchmove', event => {
+    const currentY = event.touches[0]?.clientY;
+    if (_touchScrollStartY === null || currentY === undefined) return;
+    const delta = currentY - _touchScrollStartY;
+    if (delta > 2) {
+        _userScrollIntent = 'up';
+        // Pause before the next stream frame can enqueue another bottom snap.
+        _autoScrollEnabled = false;
+        if (typeof cancelHistoryBottomPins === 'function') cancelHistoryBottomPins();
+        if (typeof cancelQueuedChatScroll === 'function') cancelQueuedChatScroll();
+        _maybeLoadEarlierHistory();
+    } else if (delta < -2) {
+        _userScrollIntent = 'down';
+    }
+}, { passive: true });
+const clearTouchScroll = () => { _touchScrollStartY = null; };
+messagesDiv.addEventListener('touchend', clearTouchScroll, { passive: true });
+messagesDiv.addEventListener('touchcancel', clearTouchScroll, { passive: true });
+messagesDiv.addEventListener('keydown', event => {
+    if (event.target.closest('input, textarea, select, [contenteditable="true"]')) return;
+    if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey)) _userScrollIntent = 'up';
+    else if (['ArrowDown', 'PageDown', 'End'].includes(event.key) || (event.key === ' ' && !event.shiftKey)) _userScrollIntent = 'down';
+});
+messagesDiv.addEventListener('pointerdown', event => {
+    const rect = messagesDiv.getBoundingClientRect();
+    if (event.target === messagesDiv && event.clientX >= rect.right - 16) _userScrollIntent = 'scrollbar';
+}, { passive: true });
 
 messagesDiv.addEventListener('scroll', () => {
     const scrollTop = messagesDiv.scrollTop;
     const distFromBottom = messagesDiv.scrollHeight - scrollTop - messagesDiv.clientHeight;
-
-    if (_programmaticScroll) {
-        // Our own scroll-to-bottom; don't reinterpret it as user intent.
+    if (_userScrollIntent !== null) {
+        const intent = _userScrollIntent === 'scrollbar'
+            ? (scrollTop < _lastScrollTop - 1 ? 'up' : scrollTop > _lastScrollTop + 1 ? 'down' : null)
+            : _userScrollIntent;
+        if (intent === 'up') {
+            _autoScrollEnabled = false;
+            if (typeof cancelHistoryBottomPins === 'function') cancelHistoryBottomPins();
+            _maybeLoadEarlierHistory();
+        } else if (intent === 'down' && distFromBottom <= _SCROLL_THRESHOLD) {
+            _autoScrollEnabled = true;
+        }
         _programmaticScroll = false;
-    } else if (scrollTop < _lastScrollTop - 1) {
-        // User scrolled up (any amount) -> stop following the stream.
-        _autoScrollEnabled = false;
-    } else if (distFromBottom <= _SCROLL_THRESHOLD) {
-        // User is back near the bottom -> resume auto-scroll.
-        _autoScrollEnabled = true;
+        _programmaticScrollTop = null;
     }
-
+    _userScrollIntent = null;
+    _programmaticScroll = false;
+    _programmaticScrollTop = null;
     _lastScrollTop = scrollTop;
     _updateScrollToBottomBtn();
 });
+
+// Composer resizing changes the viewport, not the user's intent.
+// Observe the viewport rather than each message so long conversations stay cheap.
+if (typeof ResizeObserver !== 'undefined') {
+    let previousWidth = messagesDiv.clientWidth;
+    let previousHeight = messagesDiv.clientHeight;
+    const chatViewportObserver = new ResizeObserver(() => {
+        const width = messagesDiv.clientWidth;
+        const height = messagesDiv.clientHeight;
+        if (width === previousWidth && height === previousHeight) return;
+        previousWidth = width;
+        previousHeight = height;
+        refreshChatScrollControls();
+    });
+    chatViewportObserver.observe(messagesDiv);
+}
 
 // Intercept internal navigation links in chat messages
 messagesDiv.addEventListener('click', (e) => {

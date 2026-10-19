@@ -741,6 +741,7 @@ function _triggerManualTts(btn, botEl, text) {
 }
 
 function addUserMessage(content, timestamp, attachments) {
+    cancelChatScrollForNavigation();
     const el = createUserMessageEl(content, timestamp, attachments);
     messagesDiv.appendChild(el);
     _autoScrollEnabled = true;
@@ -750,12 +751,25 @@ function addUserMessage(content, timestamp, attachments) {
 function addBotMessage(content, timestamp, requestId) {
     const el = createBotMessageEl(content, timestamp, requestId);
     messagesDiv.appendChild(el);
-    scrollChatToBottom();
+    refreshChatScrollControls();
+    _updateScrollToBottomBtn();
 }
 
 // Bumped to call off the bottom re-pins of a first load that have not run yet,
 // when the view is sent elsewhere in the conversation (chat/timeline.js).
 let historyPinToken = 0;
+let historyPinSession = '';
+
+function cancelHistoryBottomPins() {
+    historyPinToken++;
+}
+
+function cancelChatScrollForNavigation() {
+    cancelHistoryBottomPins();
+    if (typeof cancelQueuedChatScroll === 'function') cancelQueuedChatScroll();
+    _autoScrollEnabled = false;
+    _updateScrollToBottomBtn();
+}
 
 // Load conversation history from the server (page 1 = most recent messages).
 // Subsequent pages prepend older messages when the user scrolls to the top.
@@ -905,14 +919,15 @@ function loadHistory(page, untilSeq) {
                 );
             }
 
-            // Manage the "load more" sentinel at the very top
+            // Older pages load as the reader nears the top (chat/state.js);
+            // the sentinel only marks that more history exists.
             if (data.has_more) {
                 if (!document.getElementById('history-load-more')) {
-                    const btn = document.createElement('div');
-                    btn.id = 'history-load-more';
-                    btn.className = 'flex justify-center py-3';
-                    btn.innerHTML = `<button class="text-xs text-slate-400 dark:text-slate-500 hover:text-primary-400 transition-colors" onclick="loadHistory(historyPage + 1)">Load earlier messages</button>`;
-                    messagesDiv.insertBefore(btn, messagesDiv.firstChild);
+                    const sentinel = document.createElement('div');
+                    sentinel.id = 'history-load-more';
+                    sentinel.className = 'flex justify-center py-3 text-xs text-slate-400 dark:text-slate-500';
+                    sentinel.innerHTML = '<i class="fas fa-spinner fa-spin" aria-hidden="true"></i>';
+                    messagesDiv.insertBefore(sentinel, messagesDiv.firstChild);
                 }
             } else {
                 const sentinel = document.getElementById('history-load-more');
@@ -929,12 +944,13 @@ function loadHistory(page, untilSeq) {
             }
 
             if (isFirstLoad) {
-                // Scroll to the very bottom after the DOM settles. A single
-                // rAF isn't enough: markdown/code-highlight/images keep growing
-                // scrollHeight after the first paint, leaving the last bubble's
-                // timestamp clipped. Re-pin a few times to catch late layout.
+                // Re-pin late media/layout only while the reader has not moved.
                 const pin = ++historyPinToken;
-                const repin = () => { if (pin === historyPinToken) scrollChatToBottom(true); };
+                historyPinSession = historySessionId;
+                const repin = () => {
+                    if (pin === historyPinToken && historyPinSession === sessionId && _autoScrollEnabled) scrollChatToBottom();
+                    else refreshChatScrollControls();
+                };
                 requestAnimationFrame(repin);
                 [120, 350, 700].forEach(d => setTimeout(repin, d));
             } else {

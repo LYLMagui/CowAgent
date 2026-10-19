@@ -7,6 +7,7 @@
 // =====================================================================
 const I18N = {
     zh: {
+        chat_scroll_to_bottom: '滚动到底部',
         todo_title: '任务',
         todo_pending: '未开始', todo_in_progress: '进行中', todo_completed: '已完成',
         console: '控制台',
@@ -179,6 +180,8 @@ const I18N = {
         models_search_tavily_desc: '前往 tavily.com 控制台创建 API Key。',
         models_search_searxng_title: '配置 SearXNG 实例 URL',
         models_search_searxng_desc: '输入自托管 SearXNG 实例的 URL（无需 API Key）。',
+        models_search_deepseek_title: '配置 DeepSeek 搜索',
+        models_search_deepseek_desc: '与 DeepSeek 模型共用同一组 API Key 和 Base URL，修改后模型调用也会生效。',
         models_search_anysearch_anon_hint: '留空可启用匿名模式（无需 API Key）',
         models_search_anonymous_badge: '匿名',
         models_search_anonymous_disable: '停用匿名',
@@ -702,6 +705,7 @@ const I18N = {
     },
     'zh-Hant': {
 
+        chat_scroll_to_bottom: '捲動至底部',
         todo_title: '任務',
         todo_pending: '未開始', todo_in_progress: '進行中', todo_completed: '已完成',
         console: '控制台',
@@ -874,6 +878,8 @@ const I18N = {
         models_search_tavily_desc: '前往 tavily.com 控制台建立 API Key',
         models_search_searxng_title: '設定 SearXNG 實例 URL',
         models_search_searxng_desc: '輸入自託管 SearXNG 實例的 URL（無需 API Key）。',
+        models_search_deepseek_title: '設定 DeepSeek 搜尋',
+        models_search_deepseek_desc: '與 DeepSeek 模型共用同一組 API Key 和 Base URL，修改後模型呼叫也會生效。',
         models_search_anysearch_anon_hint: '留空可啟用匿名模式（無需 API Key）',
         models_search_anonymous_badge: '匿名',
         models_search_anonymous_disable: '停用匿名',
@@ -1392,6 +1398,7 @@ const I18N = {
         mermaid_preview_failed: '圖表無法渲染',
         },
     en: {
+        chat_scroll_to_bottom: 'Scroll to bottom',
         todo_title: 'Tasks',
         todo_pending: 'Pending', todo_in_progress: 'In progress', todo_completed: 'Completed',
         console: 'Console',
@@ -1564,6 +1571,8 @@ const I18N = {
         models_search_tavily_desc: 'Create a key at the Tavily console (tavily.com).',
         models_search_searxng_title: 'Configure SearXNG Instance URL',
         models_search_searxng_desc: 'Enter the URL of your self-hosted SearXNG instance (no API key required).',
+        models_search_deepseek_title: 'Configure DeepSeek Search',
+        models_search_deepseek_desc: 'Shares the API key and base URL with the DeepSeek model; changes here apply to model calls too.',
         models_search_anysearch_anon_hint: 'Leave empty to enable anonymous mode (no API key required)',
         models_search_anonymous_badge: 'anonymous',
         models_search_anonymous_disable: 'Disable anonymous',

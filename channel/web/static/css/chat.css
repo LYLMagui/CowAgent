@@ -1238,3 +1238,47 @@
 .dark .todo-completed, .dark .todo-completed span { color: #64748b; }
 .dark .todo-explanation { border-color: rgba(255, 255, 255, 0.08); }
 
+/* Keep the browser's scroll anchor on the message list while content grows. */
+#chat-messages {
+    overflow-anchor: auto;
+}
+
+/* Right edge lines up with the composer card (px-4 gutter, max-w-3xl column). */
+.chat-scroll-to-bottom {
+    position: absolute;
+    z-index: 20;
+    right: max(16px, calc((100% - 768px) / 2));
+    bottom: calc(var(--chat-composer-height, 96px) + 12px);
+    display: flex;
+    width: 32px;
+    height: 32px;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid #e2e8f0;
+    border-radius: 9999px;
+    background: #fff;
+    color: #64748b;
+    font-size: 12px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    cursor: pointer;
+    transition: color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+.chat-scroll-to-bottom.hidden {
+    display: none;
+}
+.chat-scroll-to-bottom:hover {
+    color: #16a34a;
+    transform: scale(1.05);
+}
+.chat-scroll-to-bottom:focus-visible {
+    outline: 2px solid #35a85b;
+    outline-offset: 2px;
+}
+.dark .chat-scroll-to-bottom {
+    border-color: rgba(255, 255, 255, 0.15);
+    background: #2a2a2a;
+    color: #94a3b8;
+}
+.dark .chat-scroll-to-bottom:hover {
+    color: #4ade80;
+}
