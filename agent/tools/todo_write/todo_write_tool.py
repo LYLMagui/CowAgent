@@ -6,9 +6,10 @@ from agent.tools.base_tool import BaseTool, ToolResult
 from common.log import logger
 
 STATUSES = ("pending", "in_progress", "completed")
+MAX_TODOS = 10
 
 _DESC_HEAD = (
-    "Record and update the complete todo list for multi-step tasks. "
+    "Record and update the complete todo list for multi-step tasks, with at most 10 items. "
     "For tasks with two or more concrete steps, call this before starting and use one item per step. "
     "Skip trivial single-step tasks; do not split work just to use this tool. "
     "Always provide the complete list, replacing the previous list rather than merging changes. "
@@ -67,9 +68,11 @@ class TodoWriteTool(BaseTool):
         "properties": {
             "todos": {
                 "type": "array",
+                "maxItems": MAX_TODOS,
                 "description": (
-                    "Complete todo list in execution order; replaces the previous list. "
-                    "Include every item on each call. Pass an empty array to clear it."
+                    f"Complete todo list in execution order, with at most {MAX_TODOS} items; "
+                    "replaces the previous list. Include every item on each call. "
+                    "Pass an empty array to clear it."
                 ),
                 "items": {
                     "type": "object",
@@ -134,6 +137,9 @@ class TodoWriteTool(BaseTool):
         incoming = params["todos"]
         if not isinstance(incoming, list):
             raise ValueError("todos must be an array; pass [] to clear the list")
+
+        if len(incoming) > MAX_TODOS:
+            raise ValueError(f"todos must contain at most {MAX_TODOS} items")
 
         explanation = params.get("explanation", "")
         if not isinstance(explanation, str):

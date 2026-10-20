@@ -2658,6 +2658,12 @@ class AgentStreamExecutor:
             {"role": "system", "content": self.system_prompt}
         )
         budget = int((window - completion - system_tokens) * 0.9)
+        # The provider may report a smaller window than the catalog; tighten
+        # the recovery note allowance before retrying.
+        self._todo_context_token_limit = max(1, budget // 20)
+        todo_tokens = self._todo_context_tokens()
+        if getattr(self, "_todo_owner", None) is not None:
+            return max(1, budget - todo_tokens)
         return max(2000, budget)
 
     def _smart_compact_to_budget(self, error_str: str) -> bool:
@@ -2677,7 +2683,9 @@ class AgentStreamExecutor:
         """
         COMPRESS_THRESHOLD = 5
 
+        original_todo_tokens = self._todo_context_tokens()
         input_budget = self._overflow_input_budget(error_str)
+        todo_reduced = self._todo_context_tokens() < original_todo_tokens
         original_count = len(self.messages)
 
         turns = self._identify_complete_turns()
@@ -2747,6 +2755,8 @@ class AgentStreamExecutor:
                 logger.warning("🧹 Smart compaction produced no messages, will clear history")
                 return False
             if len(new_messages) >= original_count:
+                if todo_reduced:
+                    return True
                 logger.warning("🧹 Smart compaction could not reduce the context, will clear history")
                 return False
 
@@ -2855,7 +2865,8 @@ class AgentStreamExecutor:
             max_tokens = input_ceiling
 
         system_tokens = self.agent._estimate_message_tokens({"role": "system", "content": self.system_prompt})
-        budget = max_tokens - system_tokens
+        todo_tokens = self._todo_context_tokens()
+        budget = max_tokens - system_tokens - todo_tokens
         current_tokens = sum(self._estimate_turn_tokens(turn) for turn in turns)
 
         # Step 3: Trim to satisfy BOTH constraints (AND):
@@ -2865,7 +2876,7 @@ class AgentStreamExecutor:
         # History is only kept when it fits within the token budget AND the
         # turn cap. If both are already satisfied, keep everything untouched
         # (no trimming, no summary LLM call).
-        if current_tokens + system_tokens <= max_tokens and len(turns) <= self.max_context_turns:
+        if current_tokens <= budget and len(turns) <= self.max_context_turns:
             new_messages = []
             for turn in turns:
                 new_messages.extend(turn['messages'])
@@ -2922,7 +2933,7 @@ class AgentStreamExecutor:
         # already thin. This keeps the user query + final reply of each turn.
         COMPRESS_THRESHOLD = 5
         if (not kept_previous and len(kept_turns) < COMPRESS_THRESHOLD
-                and kept_tokens + system_tokens > max_tokens):
+                and kept_tokens > budget):
             compressed_turns = []
             for t in kept_turns:
                 compressed = compress_turn_to_text_only(t)
@@ -2982,12 +2993,149 @@ class AgentStreamExecutor:
                 return idx
         return None
 
+    def _todo_context_text(self) -> str:
+        """Render durable state within a bounded request-only token allowance."""
+        owner = getattr(self, "_todo_owner", None)
+        if owner is None:
+            return ""
+
+        store, session_id, _agent_id, _run_id = owner
+        if store is None:
+            return ""
+
+        try:
+            from agent.tools.todo_write.todo_write_tool import MAX_TODOS
+
+            snapshot = store.get_todo_snapshot(session_id)
+        except Exception as exc:
+            logger.exception(
+                "[Todo] Failed to load snapshot for session=%s", session_id
+            )
+            raise RuntimeError(
+                "Failed to load the current todo state; the model request was not sent"
+            ) from exc
+
+        if snapshot is None:
+            return ""
+
+        todos = snapshot.get("todos")
+        if not isinstance(todos, list) or any(
+            not isinstance(item, dict)
+            or item.get("status") not in ("pending", "in_progress", "completed")
+            or not isinstance(item.get("content"), str)
+            or not item["content"].strip()
+            for item in todos
+        ):
+            raise RuntimeError("The current todo snapshot is invalid; the model request was not sent")
+
+        from agent.protocol.agent import Agent
+
+        estimate = Agent._estimate_text_tokens
+        budget = 2048
+        if self.agent is not None and hasattr(self.agent, "_get_model_context_window"):
+            available = max(1, self.agent._get_model_context_window()
+                            - self.agent._get_output_reserve_tokens())
+            cap = getattr(self.agent, "max_context_tokens", None)
+            if cap:
+                available = min(available, cap)
+            budget = min(budget, max(1, available // 20))
+        budget = min(budget, getattr(self, "_todo_context_token_limit", budget))
+
+        header = _t(
+            f"当前待办状态（版本 {snapshot['version']}，以此为准）：",
+            f"Current todo state (version {snapshot['version']}; authoritative):",
+        )
+        instruction = _t(
+            "请以此清单为准继续执行；任务变化时用 todo_write 更新完整清单。",
+            "Continue from this list; use todo_write to update the complete list when it changes.",
+        )
+        if len(todos) > MAX_TODOS:
+            instruction += _t(
+                f" 旧清单共 {len(todos)} 项，下次写入请整理至最多 {MAX_TODOS} 项。",
+                f" This legacy list has {len(todos)} items; consolidate it to at most {MAX_TODOS} on the next write.",
+            )
+        if not todos:
+            text = header + "\n" + _t(
+                "当前待办清单为空，不要恢复旧清单。",
+                "The current todo list is empty; do not restore an older list.",
+            )
+            return text if estimate(text) <= budget else ""
+
+        marks = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
+
+        def render(limit=None):
+            lines = [header]
+            for item in todos:
+                content = item["content"].strip()
+                if limit is not None and len(content) > limit:
+                    content = content[:limit] + "…"
+                lines.append(f"{marks[item['status']]} {content}")
+            lines.append(instruction)
+            if limit is not None:
+                lines.append(_t(
+                    "描述已缩略，原文仍完整保存；核对任务含义后再更新，勿凭缩略文本重建清单。",
+                    "Descriptions are abbreviated; originals remain stored. Verify task details before updating; do not rebuild from abbreviations.",
+                ))
+            return "\n".join(lines)
+
+        text = render()
+        if estimate(text) <= budget:
+            return text
+        # Abbreviate only the request view. Binary search bounds the estimated
+        # token cost of mixed-language descriptions without changing storage.
+        low, high = 0, max(len(item["content"]) for item in todos)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if estimate(render(middle)) <= budget:
+                low = middle
+            else:
+                high = middle - 1
+        text = render(low)
+        if estimate(text) <= budget:
+            return text
+        # An oversized legacy list falls back to counts. The note must forbid
+        # replacing the stored list from this incomplete view.
+        counts = {status: sum(item["status"] == status for item in todos) for status in marks}
+        text = header + "\n" + _t(
+            f"清单过长，条目未注入：{counts}。原文仍完整保存。请先核对原计划；不要根据此统计覆盖清单。",
+            f"List too long; items omitted: {counts}. Originals remain stored. Verify the original plan. Do not replace or rebuild the list from these counts.",
+        )
+        if estimate(text) > budget:
+            logger.warning("[Todo] Recovery note omitted: insufficient token budget")
+            return ""
+        return text
+
+    def _todo_context_tokens(self) -> int:
+        from agent.protocol.agent import Agent
+
+        return Agent._estimate_text_tokens(self._todo_context_text())
+
     def _prepare_messages(self) -> List[Dict[str, Any]]:
-        """
-        Prepare messages to send to LLM
-        
-        Note: For Claude API, system prompt should be passed separately via system parameter,
-        not as a message. The AgentLLMModel will handle this.
-        """
-        # Don't add system message here - it will be handled separately by the LLM adapter
-        return self.messages
+        """Inject current todos into a request copy without changing history."""
+        state_text = self._todo_context_text()
+        if not state_text:
+            return self.messages
+        messages = self.messages.copy()
+        user_index = next(
+            (
+                index for index in range(len(messages) - 1, -1, -1)
+                if messages[index].get("role") == "user"
+            ),
+            None,
+        )
+        if user_index is None:
+            raise RuntimeError(
+                "No user message is available for the current todo state; "
+                "the model request was not sent"
+            )
+
+        user_message = copy.copy(messages[user_index])
+        messages[user_index] = user_message
+        content = user_message.get("content")
+        if isinstance(content, list):
+            user_message["content"] = content + [{"type": "text", "text": state_text}]
+        elif isinstance(content, str):
+            user_message["content"] = content + "\n\n" + state_text
+        else:
+            user_message["content"] = [{"type": "text", "text": state_text}]
+        return messages

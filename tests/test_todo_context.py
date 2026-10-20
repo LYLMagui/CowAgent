@@ -10,6 +10,7 @@ import pytest
 from agent.memory.conversation_store import ConversationStore
 from agent.protocol.agent_stream import AgentStreamExecutor
 from agent.tools.todo_write.todo_write_tool import TodoContext, TodoWriteTool
+from common.i18n import t as _t
 from common.utils import clear_agent_run_id, set_agent_run_id
 from bridge.agent_bridge import _todo_enabled_for_context
 
@@ -92,6 +93,109 @@ def test_todo_prompt_rule_only_appears_when_tool_is_available():
         )
         assert marker not in without
         assert marker in with_todo
+
+
+def test_todo_write_accepts_ten_items_and_rejects_eleven(tmp_path):
+    assert TodoWriteTool.params["properties"]["todos"]["maxItems"] == 10
+    assert "at most 10 items" in TodoWriteTool().description
+
+    todos_10 = [
+        {"content": f"Step {index}", "status": "pending"}
+        for index in range(10)
+    ]
+    todos_11 = todos_10 + [{"content": "Step 10", "status": "pending"}]
+
+    store = _store(tmp_path / "index.db")
+    events = []
+    executor = _executor(TodoWriteTool(), events)
+    executor.bind_todo_owner(store, "session", "owner", "run")
+
+    assert _call(executor, todos=todos_10)["status"] == "success"
+    assert store.get_todo_snapshot("session")["todos"] == todos_10
+    assert len(_updates(events)) == 1
+
+    assert "at most 10 items" in _call(executor, run_id="run-2", todos=todos_11)["result"]
+    assert store.get_todo_snapshot("session")["todos"] == todos_10
+    assert len(_updates(events)) == 1
+
+    clear_executor = _executor(TodoWriteTool(), events)
+    clear_executor.bind_todo_owner(store, "session", "owner", "run-4")
+    assert _call(clear_executor, run_id="run-4", todos=[])["status"] == "success"
+    assert store.get_todo_snapshot("session")["todos"] == []
+    assert len(_updates(events)) == 2
+
+
+def test_todo_request_snapshot_is_latest_and_does_not_mutate_history(tmp_path):
+    store = _store(tmp_path / "index.db")
+    first = [{"content": "First step", "status": "in_progress"}]
+    second = [{"content": "Second step", "status": "pending"}]
+    store.commit_todo_snapshot("session", "run", "first", first)
+
+    executor = _executor(TodoWriteTool(), [])
+    executor.messages = [
+        {"role": "user", "content": [{"type": "text", "text": "Continue."}]},
+    ]
+    executor.bind_todo_owner(store, "session", "owner", "run")
+
+    first_request = executor._prepare_messages()
+    first_text = first_request[-1]["content"][-1]["text"]
+    assert "First step" in first_text
+    assert _t("版本 1", "version 1") in first_text
+    assert len(executor.messages[0]["content"]) == 1
+
+    store.commit_todo_snapshot("session", "run", "second", second)
+    second_request = executor._prepare_messages()
+    second_text = second_request[-1]["content"][-1]["text"]
+    assert "Second step" in second_text
+    assert "First step" not in second_text
+    assert _t("版本 2", "version 2") in second_text
+    assert len(executor.messages[0]["content"]) == 1
+
+    store.commit_todo_snapshot("session", "run", "clear", [])
+    empty_text = executor._prepare_messages()[-1]["content"][-1]["text"]
+    assert _t("当前待办清单为空", "The current todo list is empty") in empty_text
+    assert "First step" not in empty_text
+    assert "Second step" not in empty_text
+
+
+def test_todo_snapshot_is_included_in_llm_request_only(tmp_path):
+    store = _store(tmp_path / "index.db")
+    todos = [{"content": "Resume the task", "status": "in_progress"}]
+    store.commit_todo_snapshot("session", "run", "call", todos)
+
+    class CapturingModel:
+        model = "test-model"
+
+        def __init__(self):
+            self.requests = []
+
+        def call_stream(self, request):
+            self.requests.append(request)
+            yield {"choices": [{"delta": {"content": "continued"}}]}
+
+    model = CapturingModel()
+    executor = _executor(TodoWriteTool(), [])
+    executor.model = model
+    executor.agent = type("Agent", (), {"last_usage": None})()
+    executor.messages = [
+        {"role": "user", "content": [{"type": "text", "text": "Continue."}]},
+    ]
+    executor.bind_todo_owner(store, "session", "owner", "run")
+    executor._validate_and_fix_messages = lambda: None
+    executor._catalog_max_output_tokens = lambda: 16
+    executor._is_thinking_enabled = lambda: False
+    executor._filter_think_stream = lambda text: text
+    executor._filter_think_tags = lambda text: text
+
+    executor._call_llm_stream(retry_on_empty=False)
+
+    request_content = model.requests[0].messages[-1]["content"]
+    assert "[~] Resume the task" in request_content[-1]["text"]
+    assert request_content[-1]["text"].endswith(_t(
+        "请以此清单为准继续执行；任务变化时用 todo_write 更新完整清单。",
+        "Continue from this list; use todo_write to update the complete list when it changes.",
+    ))
+    assert len(executor.messages[0]["content"]) == 1
 
 
 def test_commit_is_durable_before_event_and_model_result(tmp_path):

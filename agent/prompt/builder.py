@@ -315,7 +315,8 @@ def _build_tooling_section(tools: List[Any], language: str) -> List[str]:
         if has_todo_write:
             lines.insert(
                 7,
-                "- For tasks with two or more concrete steps, call `todo_write` before starting work, with one item per step. "
+                "- For tasks with two or more concrete steps, call `todo_write` before starting work, with one item per step and no more than 10 items. "
+                "If the plan needs more than 10 steps, group related steps into phases. "
                 "Continue the task immediately after writing the list; do not stop after listing todos. "
                 "Mark each item completed as soon as it is done, and update the complete list when steps change. "
                 "Skip trivial single-step tasks; do not split work just to use the tool.",
@@ -347,7 +348,8 @@ def _build_tooling_section(tools: List[Any], language: str) -> List[str]:
         if has_todo_write:
             lines.insert(
                 7,
-                "- 任务包含两个或更多具体步骤时，在开始执行前调用 `todo_write` 列出待办，每个步骤对应一项。"
+                "- 任务包含两个或更多具体步骤时，在开始执行前调用 `todo_write` 列出待办，每个步骤对应一项，最多 10 项。"
+                "如果计划超过 10 步，应将相关步骤归并为阶段。"
                 "列完立即继续执行，不要只列待办就结束回复。"
                 "每完成一项就立即标记为 completed，步骤变化时更新完整列表。"
                 "简单的单步任务可以跳过，不要为了使用工具而人为拆分任务。",
