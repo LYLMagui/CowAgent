@@ -125,37 +125,67 @@ def test_todo_write_accepts_ten_items_and_rejects_eleven(tmp_path):
     assert len(_updates(events)) == 2
 
 
-def test_todo_request_snapshot_is_latest_and_does_not_mutate_history(tmp_path):
-    store = _store(tmp_path / "index.db")
-    first = [{"content": "First step", "status": "in_progress"}]
-    second = [{"content": "Second step", "status": "pending"}]
-    store.commit_todo_snapshot("session", "run", "first", first)
-
+def _recovering_executor(store, messages, pending=True):
     executor = _executor(TodoWriteTool(), [])
-    executor.messages = [
-        {"role": "user", "content": [{"type": "text", "text": "Continue."}]},
-    ]
+    executor.agent = type("Agent", (), {
+        "last_usage": None, "_todo_recovery_pending": pending, "_todo_recovery": None,
+    })()
+    executor.messages = messages
     executor.bind_todo_owner(store, "session", "owner", "run")
+    return executor
 
-    first_request = executor._prepare_messages()
-    first_text = first_request[-1]["content"][-1]["text"]
-    assert "First step" in first_text
-    assert _t("版本 1", "version 1") in first_text
+
+def test_todo_is_injected_only_when_recovery_is_pending(tmp_path):
+    store = _store(tmp_path / "index.db")
+    store.commit_todo_snapshot("session", "run", "first", TODOS)
+    messages = [{"role": "user", "content": [{"type": "text", "text": "Continue."}]}]
+
+    idle = _recovering_executor(store, messages, pending=False)
+    assert idle._prepare_messages() is idle.messages
+
+    executor = _recovering_executor(store, messages)
+    request = executor._prepare_messages()
+    assert "[~] Read source" in request[-1]["content"][-1]["text"]
+    assert _t("版本 1", "version 1") in request[-1]["content"][-1]["text"]
+    assert executor.agent._todo_recovery_pending is False
     assert len(executor.messages[0]["content"]) == 1
 
-    store.commit_todo_snapshot("session", "run", "second", second)
-    second_request = executor._prepare_messages()
-    second_text = second_request[-1]["content"][-1]["text"]
-    assert "Second step" in second_text
-    assert "First step" not in second_text
-    assert _t("版本 2", "version 2") in second_text
+
+def test_recovery_note_stays_fixed_across_updates_and_runs(tmp_path):
+    store = _store(tmp_path / "index.db")
+    store.commit_todo_snapshot("session", "run", "first", TODOS)
+    executor = _recovering_executor(
+        store, [{"role": "user", "content": [{"type": "text", "text": "Continue."}]}]
+    )
+    first = executor._prepare_messages()
+
+    store.commit_todo_snapshot("session", "run", "second", [{"content": "Verify", "status": "pending"}])
+    executor.messages.extend([
+        {"role": "assistant", "content": [{"type": "text", "text": "working"}]},
+        {"role": "user", "content": [{"type": "text", "text": "next"}]},
+    ])
+    second = executor._prepare_messages()
+    assert second[:len(first)] == first
+    assert second[len(first):] == executor.messages[len(first):]
+
+    next_run = _executor(TodoWriteTool(), [])
+    next_run.agent = executor.agent
+    next_run.messages = list(executor.messages)
+    next_run.bind_todo_owner(store, "session", "owner", "next-run")
+    assert next_run._prepare_messages() == second
     assert len(executor.messages[0]["content"]) == 1
 
+
+def test_empty_snapshot_recovery_does_not_restore_an_old_list(tmp_path):
+    store = _store(tmp_path / "index.db")
+    store.commit_todo_snapshot("session", "run", "first", TODOS)
     store.commit_todo_snapshot("session", "run", "clear", [])
-    empty_text = executor._prepare_messages()[-1]["content"][-1]["text"]
-    assert _t("当前待办清单为空", "The current todo list is empty") in empty_text
-    assert "First step" not in empty_text
-    assert "Second step" not in empty_text
+    executor = _recovering_executor(
+        store, [{"role": "user", "content": [{"type": "text", "text": "Continue."}]}]
+    )
+    text = executor._prepare_messages()[-1]["content"][-1]["text"]
+    assert _t("当前待办清单为空", "The current todo list is empty") in text
+    assert "Read source" not in text
 
 
 def test_todo_snapshot_is_included_in_llm_request_only(tmp_path):
@@ -176,7 +206,9 @@ def test_todo_snapshot_is_included_in_llm_request_only(tmp_path):
     model = CapturingModel()
     executor = _executor(TodoWriteTool(), [])
     executor.model = model
-    executor.agent = type("Agent", (), {"last_usage": None})()
+    executor.agent = type("Agent", (), {
+        "last_usage": None, "_todo_recovery_pending": True, "_todo_recovery": None,
+    })()
     executor.messages = [
         {"role": "user", "content": [{"type": "text", "text": "Continue."}]},
     ]
@@ -192,8 +224,8 @@ def test_todo_snapshot_is_included_in_llm_request_only(tmp_path):
     request_content = model.requests[0].messages[-1]["content"]
     assert "[~] Resume the task" in request_content[-1]["text"]
     assert request_content[-1]["text"].endswith(_t(
-        "请以此清单为准继续执行；任务变化时用 todo_write 更新完整清单。",
-        "Continue from this list; use todo_write to update the complete list when it changes.",
+        "之后的 todo_write 结果优先；任务变化时用 todo_write 更新完整清单。",
+        "Later todo_write results take precedence; use todo_write to update the complete list when it changes.",
     ))
     assert len(executor.messages[0]["content"]) == 1
 

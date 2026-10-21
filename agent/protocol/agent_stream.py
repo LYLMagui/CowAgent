@@ -1895,6 +1895,7 @@ class AgentStreamExecutor:
                 # because every load path strips tool_use/tool_result blocks.
                 logger.warning("🔄 Resetting in-memory context to recover (stored history kept)")
                 self.messages.clear()
+                self._request_todo_recovery()
                 if is_context_overflow:
                     raise Exception(_t(
                         "抱歉，对话历史过长导致上下文溢出。我已重置当前上下文（历史记录仍然保留），请重新描述你的需求。",
@@ -2661,7 +2662,7 @@ class AgentStreamExecutor:
         # The provider may report a smaller window than the catalog; tighten
         # the recovery note allowance before retrying.
         self._todo_context_token_limit = max(1, budget // 20)
-        todo_tokens = self._todo_context_tokens()
+        todo_tokens = self._todo_context_tokens(rebuilt=True)
         if getattr(self, "_todo_owner", None) is not None:
             return max(1, budget - todo_tokens)
         return max(2000, budget)
@@ -2685,7 +2686,7 @@ class AgentStreamExecutor:
 
         original_todo_tokens = self._todo_context_tokens()
         input_budget = self._overflow_input_budget(error_str)
-        todo_reduced = self._todo_context_tokens() < original_todo_tokens
+        todo_reduced = self._todo_context_tokens(rebuilt=True) < original_todo_tokens
         original_count = len(self.messages)
 
         turns = self._identify_complete_turns()
@@ -2756,11 +2757,13 @@ class AgentStreamExecutor:
                 return False
             if len(new_messages) >= original_count:
                 if todo_reduced:
+                    self._request_todo_recovery()
                     return True
                 logger.warning("🧹 Smart compaction could not reduce the context, will clear history")
                 return False
 
         self.messages[:] = new_messages
+        self._request_todo_recovery()
         new_tokens = sum(self._estimate_turn_tokens(t) for t in turns)
         logger.info(
             f"🔄 Smart compaction: {original_count} -> {len(self.messages)} messages "
@@ -2865,7 +2868,8 @@ class AgentStreamExecutor:
             max_tokens = input_ceiling
 
         system_tokens = self.agent._estimate_message_tokens({"role": "system", "content": self.system_prompt})
-        todo_tokens = self._todo_context_tokens()
+        # Kept history repeats the current note; a trim re-renders it.
+        todo_tokens = max(self._todo_context_tokens(), self._todo_context_tokens(rebuilt=True))
         budget = max_tokens - system_tokens - todo_tokens
         current_tokens = sum(self._estimate_turn_tokens(turn) for turn in turns)
 
@@ -2977,6 +2981,7 @@ class AgentStreamExecutor:
             new_messages.extend(turn['messages'])
 
         self.messages = new_messages
+        self._request_todo_recovery()
 
     def run_start_index(self) -> Optional[int]:
         """Index in ``self.messages`` where this run's messages begin.
@@ -3042,12 +3047,12 @@ class AgentStreamExecutor:
         budget = min(budget, getattr(self, "_todo_context_token_limit", budget))
 
         header = _t(
-            f"当前待办状态（版本 {snapshot['version']}，以此为准）：",
-            f"Current todo state (version {snapshot['version']}; authoritative):",
+            f"压缩恢复时的待办状态（版本 {snapshot['version']}）：",
+            f"Todo state at context recovery (version {snapshot['version']}):",
         )
         instruction = _t(
-            "请以此清单为准继续执行；任务变化时用 todo_write 更新完整清单。",
-            "Continue from this list; use todo_write to update the complete list when it changes.",
+            "之后的 todo_write 结果优先；任务变化时用 todo_write 更新完整清单。",
+            "Later todo_write results take precedence; use todo_write to update the complete list when it changes.",
         )
         if len(todos) > MAX_TODOS:
             instruction += _t(
@@ -3105,30 +3110,71 @@ class AgentStreamExecutor:
             return ""
         return text
 
-    def _todo_context_tokens(self) -> int:
+    def _todo_context_tokens(self, rebuilt: bool = False) -> int:
+        """Estimate the recovery note the next request will carry.
+
+        A pending or ``rebuilt`` context renders the latest snapshot; otherwise
+        the request repeats the fixed note only while its anchor survives, and
+        that note may be larger than the latest snapshot.
+        """
         from agent.protocol.agent import Agent
 
-        return Agent._estimate_text_tokens(self._todo_context_text())
+        agent = self.agent
+        if agent is None:
+            return 0
+        pending = getattr(agent, "_todo_recovery_pending", False)
+        if rebuilt or (pending and getattr(self, "_todo_owner", None) is not None):
+            return Agent._estimate_text_tokens(self._todo_context_text())
+        recovery = getattr(agent, "_todo_recovery", None)
+        if not recovery or not any(m is recovery["anchor"] for m in self.messages):
+            return 0
+        return Agent._estimate_text_tokens(recovery["text"])
+
+    def _request_todo_recovery(self) -> None:
+        """Mark the context as rebuilt so the next request restores todos once."""
+        if self.agent is not None:
+            self.agent._todo_recovery_pending = True
 
     def _prepare_messages(self) -> List[Dict[str, Any]]:
-        """Inject current todos into a request copy without changing history."""
-        state_text = self._todo_context_text()
-        if not state_text:
+        """Attach the recovery note to a request copy without changing history.
+
+        The note is rendered once, right after the context is compacted or
+        rebuilt, and then repeated verbatim on the same anchor so later
+        requests share a stable prefix. Normal requests rely on the
+        todo_write results already in context.
+        """
+        agent = self.agent
+        if agent is None:
             return self.messages
-        messages = self.messages.copy()
+        if getattr(agent, "_todo_recovery_pending", False) and self._todo_owner is not None:
+            agent._todo_recovery = None
+            state_text = self._todo_context_text()
+            if state_text:
+                anchor = next(
+                    (message for message in reversed(self.messages)
+                     if message.get("role") == "user"),
+                    None,
+                )
+                if anchor is None:
+                    raise RuntimeError(
+                        "No user message is available for the current todo state; "
+                        "the model request was not sent"
+                    )
+                agent._todo_recovery = {"anchor": anchor, "text": state_text}
+            agent._todo_recovery_pending = False
+
+        recovery = getattr(agent, "_todo_recovery", None)
+        if not recovery:
+            return self.messages
         user_index = next(
-            (
-                index for index in range(len(messages) - 1, -1, -1)
-                if messages[index].get("role") == "user"
-            ),
+            (index for index, message in enumerate(self.messages)
+             if message is recovery["anchor"]),
             None,
         )
         if user_index is None:
-            raise RuntimeError(
-                "No user message is available for the current todo state; "
-                "the model request was not sent"
-            )
-
+            return self.messages
+        state_text = recovery["text"]
+        messages = self.messages.copy()
         user_message = copy.copy(messages[user_index])
         messages[user_index] = user_message
         content = user_message.get("content")

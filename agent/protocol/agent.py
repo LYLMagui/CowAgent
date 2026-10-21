@@ -137,6 +137,10 @@ class Agent:
         self.output_mode = output_mode
         self.last_usage = None  # Store last API response usage info
         self.messages = []  # Unified message history for stream mode
+        # A fresh runtime restores truncated history, so the first request
+        # after it carries one todo recovery note (see AgentStreamExecutor).
+        self._todo_recovery_pending = True
+        self._todo_recovery = None
         self.messages_lock = threading.Lock()  # Lock for thread-safe message operations
         self.memory_manager = memory_manager  # Memory manager for auto memory flush
         self.workspace_dir = workspace_dir  # Workspace directory (state root, e.g. ~/cow)
@@ -1040,6 +1044,7 @@ class Agent:
 
             new_messages.extend(arrived)
             self.messages = new_messages
+            self._todo_recovery_pending = True
             after = len(self.messages)
 
         # The last provider usage described the pre-compaction history, so it is

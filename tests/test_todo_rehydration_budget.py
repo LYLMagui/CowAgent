@@ -22,12 +22,15 @@ def _store(path, todos):
     return store
 
 
-def _executor(store, messages, window=32000):
+def _executor(store, messages, window=32000, pending=True):
     agent = Agent.__new__(Agent)
     agent.memory_manager = None
     agent.max_context_tokens = None
     agent.messages_lock = threading.RLock()
     agent.messages = messages
+    agent.last_usage = None
+    agent._todo_recovery_pending = pending
+    agent._todo_recovery = None
     agent._get_model_context_window = lambda: window
     agent._get_output_reserve_tokens = lambda: 1000
     executor = AgentStreamExecutor(agent, None, "", [TodoWriteTool()], messages=messages)
@@ -126,6 +129,100 @@ def test_tiny_provider_budget_omits_note_without_changing_snapshot(tmp_path, tod
     assert executor._todo_context_text() == ""
     assert executor._prepare_messages() == executor.messages
     assert store.get_todo_snapshot("session") == before
+
+
+def test_new_agent_starts_with_pending_recovery():
+    agent = Agent(system_prompt="", model=None, enable_skills=False)
+    assert agent._todo_recovery_pending is True
+    assert agent._todo_recovery is None
+
+
+def test_untrimmed_history_does_not_request_recovery(tmp_path):
+    store = _store(tmp_path / "index.db", [{"content": "任务", "status": "pending"}])
+    executor = _executor(store, [_message("user", "继续")], pending=False)
+    executor._trim_messages()
+    assert executor.agent._todo_recovery_pending is False
+    assert executor._prepare_messages() is executor.messages
+
+
+@pytest.mark.parametrize("trigger", ["trim", "overflow", "manual"])
+def test_compaction_requests_one_recovery(tmp_path, trigger):
+    store = _store(tmp_path / "index.db", [{"content": "压缩后继续", "status": "in_progress"}])
+    messages = []
+    for index in range(5):
+        messages.extend([_message("user", "q" * 3500), _message("assistant", "a" * 3500)])
+    executor = _executor(store, messages, window=8000, pending=False)
+    if trigger == "trim":
+        executor._trim_messages()
+        assert len(executor.messages) < len(messages)
+    elif trigger == "overflow":
+        assert executor._smart_compact_to_budget(
+            "maximum context length is 6000 tokens (1000 in the completion)"
+        )
+    else:
+        assert executor.agent.compact_context(keep_recent_turns=1)["ok"]
+        executor.messages = executor.agent.messages
+    assert executor.agent._todo_recovery_pending is True
+    assert "压缩后继续" in _injected_text(executor)
+    assert executor.agent._todo_recovery_pending is False
+
+
+def _clear_todos_after_recovery(store, executor):
+    executor._prepare_messages()
+    fixed = Agent._estimate_text_tokens(executor.agent._todo_recovery["text"])
+    store.commit_todo_snapshot("session", "run", "clear", [])
+    return fixed
+
+
+def test_trim_reserves_the_fixed_note_after_todos_shrink(tmp_path):
+    store = _store(tmp_path / "index.db", [{"content": "任务" * 5000, "status": "pending"}])
+    executor = _executor(store, [_message("user", "恢复任务")], window=10000)
+    fixed = _clear_todos_after_recovery(store, executor)
+    assert executor._todo_context_tokens() == fixed
+    executor.messages.extend([_message("assistant", "继续"), _message("user", "x" * 34800)])
+    history = sum(executor._estimate_turn_tokens(t) for t in executor._identify_complete_turns())
+    assert history + Agent._estimate_text_tokens(executor._todo_context_text()) <= 9000
+    assert history + fixed > 9000
+    executor._trim_messages()
+    assert executor.agent._todo_recovery_pending is True
+
+
+def test_overflow_retries_when_rerendering_shrinks_the_fixed_note(tmp_path):
+    store = _store(tmp_path / "index.db", [{"content": "任务" * 5000, "status": "pending"}])
+    executor = _executor(store, [_message("user", "继续")], window=128000)
+    fixed = _clear_todos_after_recovery(store, executor)
+    executor.messages.append(_message("assistant", "x" * 16000))
+    error = "maximum context length is 6000 tokens (1000 in the completion)"
+    assert executor._smart_compact_to_budget(error)
+    assert executor._todo_context_tokens() < fixed
+    assert executor.agent._todo_recovery_pending is True
+
+
+def test_provider_reset_requests_recovery_for_the_next_run(tmp_path):
+    store = _store(tmp_path / "index.db", [{"content": "任务" * 5000, "status": "pending"}])
+    executor = _executor(store, [_message("user", "继续")], window=128000)
+    executor._prepare_messages()
+    store.commit_todo_snapshot("session", "run", "next", [{"content": "重置后继续", "status": "pending"}])
+
+    class OverflowModel:
+        model = "test-model"
+
+        def call_stream(self, request):
+            raise RuntimeError("maximum context length is 1000 tokens (900 in the completion)")
+
+    executor.model = OverflowModel()
+    executor.tools = {}
+    executor._catalog_max_output_tokens = lambda: 900
+    with pytest.raises(Exception):
+        executor._call_llm_stream(retry_on_empty=False)
+    assert executor.messages == []
+    assert executor.agent._todo_recovery_pending is True
+
+    next_run = AgentStreamExecutor(
+        executor.agent, None, "", [TodoWriteTool()], messages=[_message("user", "继续")]
+    )
+    next_run.bind_todo_owner(store, "session", "owner", "next-run")
+    assert "重置后继续" in _injected_text(next_run)
 
 
 def test_manual_compact_and_reopen_restore_latest_snapshot(tmp_path):
